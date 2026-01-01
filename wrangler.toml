@@ -1,0 +1,16 @@
+name = "dpop-login-fds"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+GOOGLE_CLIENT_ID = "your-google-client-id"
+GOOGLE_CLIENT_SECRET = "your-google-client-secret"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dpop_db"
+database_id = "your-d1-id"
+
+[build]
+command = "npm run build"
