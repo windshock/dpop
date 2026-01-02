@@ -1,0 +1,12 @@
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+ACCESS_TOKEN_SECRET=dev-only-change-me
+RP_ID=localhost
+ORIGIN=http://localhost:8787
+WEBAUTHN_RP_NAME=DPoP Login
+
+# Demo scripts only (optional):
+# A test private JWK used by node scripts (e.g. scripts/ingest-demo.mjs) to generate DPoP proofs.
+# DPOP_PRIVATE_JWK={"kty":"EC","crv":"P-256",...}
+
+

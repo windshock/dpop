@@ -44,3 +44,25 @@ export interface IngestResponse {
   trust_level: string;
   reason_codes: string[];
 }
+
+export interface WebAuthnCredentialRecord {
+  id: string;
+  user_id: string;
+  credential_id: string; // base64url
+  public_key: string; // base64url (Uint8Array serialized by SimpleWebAuthn)
+  counter: number;
+  transports?: string; // JSON array
+  created_at: string;
+}
+
+export interface CanonicalEventRecord {
+  id: string;
+  event_id: string;
+  member_id_canonical: string;
+  member_id_confidence: number;
+  trust_level: string;
+  risk_score: number;
+  action: 'ALLOW' | 'CHALLENGE' | 'QUARANTINE';
+  reason_codes: string; // JSON array
+  created_at: string;
+}

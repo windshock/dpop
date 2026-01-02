@@ -4,6 +4,7 @@
   "description": "DPoP-based login site with event ingest and FDS engine",
   "main": "src/index.ts",
   "scripts": {
+    "build": "tsc --noEmit",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest"
@@ -16,6 +17,7 @@
     "wrangler": "^3.22.0"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^10.0.1",
     "jose": "^5.2.0",
     "uuid": "^9.0.1"
   }
