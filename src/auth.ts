@@ -14,6 +14,7 @@ type WebAuthnOptionsReq = { email: string };
 type WebAuthnVerifyReq = { email: string; mode: 'registration' | 'authentication'; credential: RegistrationResponseJSON | AuthenticationResponseJSON };
 type WebAuthnStepUpOptionsReq = { enrollment_id: string };
 type WebAuthnStepUpVerifyReq = { enrollment_id: string; credential: AuthenticationResponseJSON };
+type WebAuthnEnrollVerifyReq = { credential: RegistrationResponseJSON };
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -443,7 +444,11 @@ export async function handleDPoPEnrollStart(request: Request, env: Env): Promise
 export async function handleMe(request: Request, env: Env): Promise<Response> {
   const user = await getSessionUser(request, env.DB);
   if (!user) return json({ logged_in: false }, { status: 200 });
-  return json({ logged_in: true, user: { id: user.id, email: user.email } }, { status: 200 });
+  const row = (await env.DB.prepare('SELECT COUNT(1) AS c FROM webauthn_credentials WHERE user_id = ?').bind(user.id).first()) as
+    | { c: number }
+    | null;
+  const has_passkey = !!row && Number((row as any).c) > 0;
+  return json({ logged_in: true, has_passkey, user: { id: user.id, email: user.email } }, { status: 200 });
 }
 
 export async function handleLogout(request: Request, env: Env): Promise<Response> {
@@ -563,6 +568,88 @@ export async function handleWebAuthnStepUpVerify(request: Request, env: Env): Pr
     .prepare('UPDATE dpop_enrollments SET stepup_verified_at = ? WHERE id = ? AND user_id = ?')
     .bind(new Date().toISOString(), body.enrollment_id, user.id)
     .run();
+
+  // Best-effort: consume challenge
+  await env.DB.prepare('DELETE FROM webauthn_challenges WHERE id = ?').bind(challengeRow.id).run();
+
+  return json({ success: true }, { status: 200 });
+}
+
+export async function handleWebAuthnEnrollOptions(request: Request, env: Env): Promise<Response> {
+  const user = await getSessionUser(request, env.DB);
+  if (!user) return json({ error: 'unauthorized' }, { status: 401 });
+
+  const creds = ((await env.DB.prepare('SELECT * FROM webauthn_credentials WHERE user_id = ?').bind(user.id).all()).results ??
+    []) as unknown as WebAuthnCredentialRecord[];
+  if (creds.length > 0) return json({ error: 'already_registered' }, { status: 409 });
+
+  const options = await generateRegistrationOptions({
+    rpName: env.WEBAUTHN_RP_NAME,
+    rpID: env.RP_ID,
+    userID: new TextEncoder().encode(user.id),
+    userName: user.email,
+    timeout: 60_000,
+    attestationType: 'none',
+    authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+    supportedAlgorithmIDs: [...WEBAUTHN_ALGS_ES256],
+    excludeCredentials: creds.map((c) => ({ id: c.credential_id })),
+  });
+
+  const createdAt = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  await env.DB
+    .prepare('INSERT INTO webauthn_challenges (id, type, challenge, user_id, email, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(crypto.randomUUID(), 'enroll-registration', options.challenge, user.id, user.email, createdAt, expiresAt)
+    .run();
+
+  return json({ options }, { status: 200 });
+}
+
+export async function handleWebAuthnEnrollVerify(request: Request, env: Env): Promise<Response> {
+  const user = await getSessionUser(request, env.DB);
+  if (!user) return json({ error: 'unauthorized' }, { status: 401 });
+
+  const body = await readJson<WebAuthnEnrollVerifyReq>(request);
+  if (!body.credential) return json({ error: 'invalid request' }, { status: 400 });
+
+  const clientChallenge = extractClientChallenge(body.credential);
+  if (!clientChallenge) return json({ error: 'missing client challenge' }, { status: 400 });
+
+  const challengeRow = (await env.DB
+    .prepare(
+      `SELECT * FROM webauthn_challenges
+       WHERE user_id = ? AND type = ? AND challenge = ?
+       AND strftime('%s', expires_at) > strftime('%s', 'now')
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .bind(user.id, 'enroll-registration', clientChallenge)
+    .first()) as { id: string; challenge: string } | null;
+  if (!challengeRow) return json({ error: 'challenge not found or expired' }, { status: 400 });
+
+  let verification: Awaited<ReturnType<typeof verifyRegistrationResponse>>;
+  try {
+    verification = await verifyRegistrationResponse({
+      response: body.credential,
+      expectedChallenge: challengeRow.challenge,
+      expectedOrigin: env.ORIGIN,
+      expectedRPID: env.RP_ID,
+      supportedAlgorithmIDs: [...WEBAUTHN_ALGS_ES256],
+    });
+  } catch (e) {
+    return json({ error: 'webauthn enroll verify error', detail: String(e) }, { status: 400 });
+  }
+
+  if (!verification.verified || !verification.registrationInfo) return json({ error: 'webauthn enroll verify failed' }, { status: 401 });
+
+  const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+  try {
+    await env.DB
+      .prepare('INSERT INTO webauthn_credentials (id, user_id, credential_id, public_key, counter, transports, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(crypto.randomUUID(), user.id, credentialID, base64urlEncode(credentialPublicKey), counter, JSON.stringify(body.credential.response.transports ?? []), new Date().toISOString())
+      .run();
+  } catch (e) {
+    return json({ error: 'failed to store credential', detail: String(e) }, { status: 409 });
+  }
 
   // Best-effort: consume challenge
   await env.DB.prepare('DELETE FROM webauthn_challenges WHERE id = ?').bind(challengeRow.id).run();

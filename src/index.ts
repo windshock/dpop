@@ -5,6 +5,8 @@ import {
   handleGoogleStart,
   handleLogout,
   handleMe,
+  handleWebAuthnEnrollOptions,
+  handleWebAuthnEnrollVerify,
   handleWebAuthnOptions,
   handleWebAuthnStepUpOptions,
   handleWebAuthnStepUpVerify,
@@ -28,6 +30,12 @@ export default {
     }
     if (path === '/v1/auth/webauthn/verify' && request.method === 'POST') {
       return handleWebAuthnVerify(request, env);
+    }
+    if (path === '/v1/auth/webauthn/enroll/options' && request.method === 'POST') {
+      return handleWebAuthnEnrollOptions(request, env);
+    }
+    if (path === '/v1/auth/webauthn/enroll/verify' && request.method === 'POST') {
+      return handleWebAuthnEnrollVerify(request, env);
     }
     if (path === '/v1/auth/google/start' && request.method === 'GET') {
       return handleGoogleStart(request, env);
@@ -225,6 +233,12 @@ function getLoginHTML(): string {
         <button id="btn_passkey" onclick="loginWebAuthn()">Login with Passkey</button>
         <button id="btn_google" onclick="loginGoogle()">Login with Google</button>
         <button id="btn_logout" onclick="logout()" style="display:none">Logout</button>
+      </div>
+      <div class="row">
+        <button id="btn_setup_passkey" onclick="setupPasskey()" style="display:none">Set up Passkey</button>
+        <div class="muted" id="setup_passkey_hint" style="display:none">
+          Required for step-up gated DPoP key enrollment.
+        </div>
       </div>
 
       <hr/>
@@ -590,19 +604,59 @@ function getLoginHTML(): string {
       const passkeyBtn = document.getElementById('btn_passkey');
       const googleBtn = document.getElementById('btn_google');
       const logoutBtn = document.getElementById('btn_logout');
+      const setupBtn = document.getElementById('btn_setup_passkey');
+      const setupHint = document.getElementById('setup_passkey_hint');
+      const emailInput = document.getElementById('email');
 
       const me = await fetch('/v1/me').then(r => r.json()).catch(() => ({ logged_in: false }));
       if (me.logged_in) {
         el.textContent = 'Logged in as ' + me.user.email;
+        if (emailInput && !emailInput.value) emailInput.value = me.user.email;
         passkeyBtn.style.display = 'none';
         googleBtn.style.display = 'none';
         logoutBtn.style.display = 'inline-block';
+        if (me.has_passkey) {
+          setupBtn.style.display = 'none';
+          setupHint.style.display = 'none';
+        } else {
+          setupBtn.style.display = 'inline-block';
+          setupHint.style.display = 'block';
+        }
       } else {
         el.textContent = 'Not logged in';
         passkeyBtn.style.display = 'inline-block';
         googleBtn.style.display = 'inline-block';
         logoutBtn.style.display = 'none';
+        setupBtn.style.display = 'none';
+        setupHint.style.display = 'none';
       }
+    }
+    async function setupPasskey() {
+      const me = await fetch('/v1/me').then(r => r.json()).catch(() => ({ logged_in: false }));
+      if (!me.logged_in) return log({ error: 'login_required' });
+      if (me.has_passkey) return log({ success: true, note: 'passkey already registered' });
+
+      const opts = await fetch('/v1/auth/webauthn/enroll/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      }).then(async r => {
+        const t = await r.text();
+        try { return JSON.parse(t); } catch { throw new Error(t); }
+      });
+      if (opts.error) return log(opts);
+
+      const publicKey = decodeCreationOptionsFromJSON(opts.options);
+      const cred = await navigator.credentials.create({ publicKey });
+      const credential = registrationCredentialToJSON(cred);
+      const resp = await fetch('/v1/auth/webauthn/enroll/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential })
+      }).then(r => r.json());
+      log(resp);
+      await refreshSessionUI();
+      return resp;
     }
 
     // Initialize session UI on load
@@ -702,6 +756,16 @@ function getLoginHTML(): string {
     async function enrollDPoP() {
       const member_id = document.getElementById('member_id').value || undefined;
 
+      // Ensure passkey exists for step-up gated enrollment
+      const me = await fetch('/v1/me').then(r => r.json()).catch(() => ({ logged_in: false }));
+      if (!me.logged_in) return log({ error: 'login_required' });
+      if (!me.has_passkey) {
+        const r = await setupPasskey();
+        // refreshSessionUI already called
+        const me2 = await fetch('/v1/me').then(r => r.json()).catch(() => ({ logged_in: false }));
+        if (!me2.logged_in || !me2.has_passkey) return; // setup failed or cancelled
+      }
+
       // Start an enrollment (server-side 1-time challenge + TTL)
       const enroll = await fetch('/v1/dpop/enroll/start', { method: 'POST' }).then(async r => {
         const t = await r.text();
@@ -710,7 +774,7 @@ function getLoginHTML(): string {
       if (enroll.error) return log(enroll);
 
       // Step-up with passkey (user verification required)
-      const stepupOpts = await fetch('/v1/auth/webauthn/stepup/options', {
+      let stepupOpts = await fetch('/v1/auth/webauthn/stepup/options', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enrollment_id: enroll.enrollment_id })
@@ -718,6 +782,14 @@ function getLoginHTML(): string {
         const t = await r.text();
         try { return JSON.parse(t); } catch { throw new Error(t); }
       });
+      if (stepupOpts?.error === 'no_passkey_registered') {
+        await setupPasskey();
+        stepupOpts = await fetch('/v1/auth/webauthn/stepup/options', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enrollment_id: enroll.enrollment_id })
+        }).then(r => r.json());
+      }
       if (stepupOpts.error) return log(stepupOpts);
 
       const stepupPublicKey = decodeRequestOptionsFromJSON(stepupOpts.options);
