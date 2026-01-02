@@ -12,7 +12,8 @@ This project implements a DPoP-based authentication system with event ingestion 
 ## Setup
 
 1. Install dependencies: `npm install`
-2. Configure `wrangler.toml` with your D1 database ID and Google OAuth credentials.
+2. Create local dev vars: `cp .dev.vars.example .dev.vars` and fill in values (see below)
+3. Configure `wrangler.toml` with your D1 database ID (do not commit secrets here).
 3. Initialize D1 schema:
    - Remote: `wrangler d1 execute dpop_db --file=./schemas/init.sql`
    - Local: `wrangler d1 execute dpop_db --local --file=./schemas/init.sql`
@@ -35,6 +36,18 @@ Do not commit `GOOGLE_CLIENT_SECRET` to `wrangler.toml`. Use either:
 - Wrangler secret: `npx wrangler secret put GOOGLE_CLIENT_SECRET`
 - Local dev vars file: create `.dev.vars` (see `.dev.vars.example`)
 
+#### Google Cloud Console (required to get client_id/secret)
+
+You must create a Google OAuth 2.0 / OIDC client to obtain:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+
+In Google Cloud Console → **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth client ID** (Web application),
+add this redirect URI for local dev:
+
+- `http://localhost:8787/v1/auth/google/callback`
+
 ### Access token signing secret (B plan)
 
 This project issues short-lived access tokens for ingestion, and requires **both**:
@@ -48,6 +61,8 @@ Set `ACCESS_TOKEN_SECRET` (dev-only) in `.dev.vars`, and store it as a Worker se
 
 - `POST /v1/auth/webauthn/options`: Get WebAuthn options
 - `POST /v1/auth/webauthn/verify`: Verify WebAuthn credential
+- `POST /v1/auth/webauthn/enroll/options`: Create a passkey for the current session user (Google-only accounts)
+- `POST /v1/auth/webauthn/enroll/verify`: Verify passkey enrollment and store credential
 - `GET /v1/auth/google/start`: Start Google OAuth
 - `GET /v1/auth/google/callback`: Handle Google OAuth callback
 - `POST /v1/dpop/register`: Register DPoP key (requires session)
@@ -155,6 +170,13 @@ sequenceDiagram
   U->>W: POST /v1/dpop/enroll/start (Cookie: session=...)
   W->>W: create dpop_enrollments(enrollment_id, challenge, TTL)
   W-->>U: {enrollment_id, challenge}
+
+  Note over U,W: If user logged in via Google only, first create a passkey:
+  U->>W: POST /v1/auth/webauthn/enroll/options (Cookie: session=...)
+  W-->>U: {options}
+  U->>A: navigator.credentials.create(options) (userVerification=required)
+  U->>W: POST /v1/auth/webauthn/enroll/verify {credential}
+  W-->>U: {success:true}
 
   U->>W: POST /v1/auth/webauthn/stepup/options {enrollment_id} (Cookie: session=...)
   W->>W: create webauthn_challenges(type=stepup:enrollment_id)
