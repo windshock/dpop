@@ -1,4 +1,5 @@
-import type { JWK } from 'jose';
+import type { JWK, JWTPayload } from 'jose';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/types';
 import type { Env } from './env';
@@ -16,6 +17,37 @@ type WebAuthnStepUpVerifyReq = { enrollment_id: string; credential: Authenticati
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'] as const;
+const WEBAUTHN_ALGS_ES256 = [-7] as const;
+
+function googleRedirectUri(env: Env): string {
+  // redirect_uri must be fixed, not derived from request.url (prevents dynamic redirects / proxy confusion)
+  return new URL('/v1/auth/google/callback', env.ORIGIN).toString();
+}
+
+async function verifyGoogleIdToken(env: Env, idToken: string, expectedNonce: string): Promise<JWTPayload> {
+  // Google JWKS
+  const jwks = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
+  const { payload } = await jwtVerify(idToken, jwks, {
+    audience: env.GOOGLE_CLIENT_ID,
+    issuer: GOOGLE_ISSUERS as unknown as string[],
+  });
+
+  // Optional-but-recommended: iat sanity window
+  if (typeof payload.iat === 'number') {
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.iat > now + 60) throw new Error('id_token iat in future');
+    if (payload.iat < now - 10 * 60) throw new Error('id_token too old');
+  }
+
+  if (expectedNonce) {
+    if (typeof payload.nonce !== 'string' || payload.nonce !== expectedNonce) {
+      throw new Error('id_token nonce mismatch');
+    }
+  }
+  return payload;
 }
 
 function extractClientChallenge(credential: RegistrationResponseJSON | AuthenticationResponseJSON): string | null {
@@ -57,7 +89,8 @@ export async function handleWebAuthnOptions(request: Request, env: Env): Promise
       userName: user.email,
       timeout: 60_000,
       attestationType: 'none',
-      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+      supportedAlgorithmIDs: [...WEBAUTHN_ALGS_ES256],
       excludeCredentials: creds.map((c) => ({ id: c.credential_id })),
     });
 
@@ -72,7 +105,7 @@ export async function handleWebAuthnOptions(request: Request, env: Env): Promise
   const options = await generateAuthenticationOptions({
     rpID: env.RP_ID,
     timeout: 60_000,
-    userVerification: 'preferred',
+    userVerification: 'required',
     allowCredentials: creds.map((c) => ({ id: c.credential_id })),
   });
 
@@ -115,6 +148,7 @@ export async function handleWebAuthnVerify(request: Request, env: Env): Promise<
         expectedChallenge: challengeRow.challenge,
         expectedOrigin: env.ORIGIN,
         expectedRPID: env.RP_ID,
+        supportedAlgorithmIDs: [...WEBAUTHN_ALGS_ES256],
       });
     } catch (e) {
       return json({ error: 'webauthn verify error', detail: String(e) }, { status: 400 });
@@ -183,7 +217,7 @@ export async function handleWebAuthnVerify(request: Request, env: Env): Promise<
       expectedOrigin: env.ORIGIN,
       expectedRPID: env.RP_ID,
       authenticator,
-      requireUserVerification: false,
+      requireUserVerification: true,
     });
   } catch (e) {
     return json({ error: 'webauthn verify error', detail: String(e) }, { status: 400 });
@@ -191,9 +225,15 @@ export async function handleWebAuthnVerify(request: Request, env: Env): Promise<
 
   if (!verification.verified || !verification.authenticationInfo) return json({ error: 'webauthn verify failed' }, { status: 401 });
 
+  // signCount protection (best-effort): if both sides report >0 and it doesn't increase, treat as potential cloned credential.
+  const newCounter = verification.authenticationInfo.newCounter;
+  if (credRow.counter > 0 && newCounter > 0 && newCounter <= credRow.counter) {
+    return json({ error: 'sign_count_replay_detected' }, { status: 409 });
+  }
+
   await env.DB
     .prepare('UPDATE webauthn_credentials SET counter = ? WHERE credential_id = ?')
-    .bind(verification.authenticationInfo.newCounter, credRow.credential_id)
+    .bind(newCounter, credRow.credential_id)
     .run();
 
   // Best-effort: consume challenge
@@ -216,7 +256,10 @@ export async function handleWebAuthnVerify(request: Request, env: Env): Promise<
 }
 
 export async function handleGoogleStart(request: Request, env: Env): Promise<Response> {
-  const state = randomBase64url(16);
+  // Encode nonce into state so we don't need a schema migration to store nonce separately.
+  // base64url does not contain '.', so this split is safe.
+  const nonce = randomBase64url(16);
+  const state = `${randomBase64url(16)}.${nonce}`;
   const codeVerifier = randomBase64url(32);
   const codeChallenge = await sha256Base64url(codeVerifier);
 
@@ -227,13 +270,14 @@ export async function handleGoogleStart(request: Request, env: Env): Promise<Res
     .bind(state, codeVerifier, createdAt, expiresAt)
     .run();
 
-  const redirectUri = new URL('/v1/auth/google/callback', request.url).toString();
+  const redirectUri = googleRedirectUri(env);
   const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   authUrl.searchParams.set('client_id', env.GOOGLE_CLIENT_ID);
   authUrl.searchParams.set('redirect_uri', redirectUri);
   authUrl.searchParams.set('response_type', 'code');
   authUrl.searchParams.set('scope', 'openid email profile');
   authUrl.searchParams.set('state', state);
+  authUrl.searchParams.set('nonce', nonce);
   authUrl.searchParams.set('code_challenge', codeChallenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
 
@@ -245,6 +289,8 @@ export async function handleGoogleCallback(request: Request, env: Env): Promise<
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
   if (!code || !state) return json({ error: 'missing code/state' }, { status: 400 });
+
+  const nonce = state.split('.', 2)[1] ?? '';
 
   const stateRow = (await env.DB
     .prepare(
@@ -258,7 +304,7 @@ export async function handleGoogleCallback(request: Request, env: Env): Promise<
 
   await env.DB.prepare('DELETE FROM oauth_states WHERE state = ?').bind(state).run();
 
-  const redirectUri = new URL('/v1/auth/google/callback', request.url).toString();
+  const redirectUri = googleRedirectUri(env);
   const form = new URLSearchParams();
   form.set('code', code);
   form.set('client_id', env.GOOGLE_CLIENT_ID);
@@ -273,33 +319,43 @@ export async function handleGoogleCallback(request: Request, env: Env): Promise<
     body: form.toString(),
   });
   if (!tokenResp.ok) return json({ error: 'token exchange failed' }, { status: 401 });
-  const token = (await tokenResp.json()) as { access_token?: string };
-  if (!token.access_token) return json({ error: 'missing access_token' }, { status: 401 });
+  const token = (await tokenResp.json()) as { access_token?: string; id_token?: string };
+  if (!token.id_token) return json({ error: 'missing id_token' }, { status: 401 });
 
-  const userinfoResp = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-    headers: { Authorization: `Bearer ${token.access_token}` },
-  });
-  if (!userinfoResp.ok) return json({ error: 'userinfo failed' }, { status: 401 });
-  const userInfo = (await userinfoResp.json()) as { sub: string; email: string };
-  if (!userInfo.sub || !userInfo.email) return json({ error: 'invalid userinfo' }, { status: 401 });
+  let idPayload: JWTPayload;
+  try {
+    idPayload = await verifyGoogleIdToken(env, token.id_token, nonce);
+  } catch (e) {
+    return json({ error: 'invalid id_token', detail: String(e) }, { status: 401 });
+  }
 
-  const email = normalizeEmail(userInfo.email);
+  const sub = typeof idPayload.sub === 'string' ? idPayload.sub : '';
+  const emailRaw = typeof idPayload.email === 'string' ? idPayload.email : '';
+  const emailVerified = idPayload.email_verified === true;
+  if (!sub) return json({ error: 'id_token missing sub' }, { status: 401 });
+  if (!emailRaw) return json({ error: 'id_token missing email' }, { status: 401 });
+  if (!emailVerified) return json({ error: 'email_not_verified' }, { status: 401 });
+
+  const email = normalizeEmail(emailRaw);
   let user =
-    ((await env.DB.prepare('SELECT * FROM users WHERE google_id = ?').bind(userInfo.sub).first()) as User | null) ??
+    ((await env.DB.prepare('SELECT * FROM users WHERE google_id = ?').bind(sub).first()) as User | null) ??
     ((await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first()) as User | null);
 
   if (!user) {
-    user = { id: crypto.randomUUID(), email, google_id: userInfo.sub, created_at: new Date().toISOString() };
+    user = { id: crypto.randomUUID(), email, google_id: sub, created_at: new Date().toISOString() };
     await env.DB
       .prepare('INSERT INTO users (id, email, google_id, created_at) VALUES (?, ?, ?, ?)')
       .bind(user.id, user.email, user.google_id, user.created_at)
       .run();
-  } else if (user.google_id !== userInfo.sub) {
-    await env.DB.prepare('UPDATE users SET google_id = ? WHERE id = ?').bind(userInfo.sub, user.id).run();
+  } else if (user.google_id && user.google_id !== sub) {
+    // Prevent silently linking a different Google identity to an existing account.
+    return json({ error: 'google_account_already_linked_to_other_identity' }, { status: 409 });
+  } else if (!user.google_id) {
+    await env.DB.prepare('UPDATE users SET google_id = ? WHERE id = ?').bind(sub, user.id).run();
   }
 
   const sessionId = await createSession(env.DB, user.id);
-  const redirectTo = new URL('/', request.url).toString();
+  const redirectTo = new URL('/', env.ORIGIN).toString();
   const headers = new Headers({ Location: redirectTo });
   headers.append(
     'Set-Cookie',

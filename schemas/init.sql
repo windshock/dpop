@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS canonical_events (
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_dpop_keys_jkt ON dpop_keys(jkt);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
 CREATE INDEX IF NOT EXISTS idx_events_jkt ON events(jkt);
 CREATE INDEX IF NOT EXISTS idx_events_jti ON events(jti);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);

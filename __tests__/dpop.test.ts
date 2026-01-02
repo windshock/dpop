@@ -5,7 +5,7 @@ import type { KeyLike } from 'jose';
 import { calculateJkt, verifyDPoP } from '../src/dpop';
 import { nowSeconds } from '../src/utils';
 
-type DPoPKeyRow = { jkt: string; member_id?: string; user_id: string };
+type DPoPKeyRow = { jkt: string; member_id?: string; user_id: string; public_key?: string };
 
 class MockD1Statement {
   private args: unknown[] = [];
@@ -66,6 +66,12 @@ async function makeDpopJwt(opts: { jwk: JWK; privateKey: KeyLike; htm: string; h
     .sign(opts.privateKey);
 }
 
+async function makeDpopJwtWithKid(opts: { kid: string; privateKey: KeyLike; htm: string; htu: string; iat: number; jti: string }) {
+  return new SignJWT({ htm: opts.htm, htu: opts.htu, iat: opts.iat, jti: opts.jti })
+    .setProtectedHeader({ typ: 'dpop+jwt', alg: 'ES256', kid: opts.kid })
+    .sign(opts.privateKey);
+}
+
 describe('DPoP', () => {
   it('calculateJkt matches jose thumbprint', async () => {
     const { publicKey } = await generateKeyPair('ES256');
@@ -81,7 +87,7 @@ describe('DPoP', () => {
     const jkt = await calculateJkt(jwk);
 
     // register key
-    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1', member_id: 'member123' });
+    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1', member_id: 'member123', public_key: JSON.stringify(jwk) });
 
     const htu = 'https://login.access.example.com/v1/ingest/event';
     const iat = nowSeconds();
@@ -102,7 +108,7 @@ describe('DPoP', () => {
     const { publicKey, privateKey } = await generateKeyPair('ES256');
     const jwk = (await exportJWK(publicKey)) as JWK;
     const jkt = await calculateJkt(jwk);
-    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1' });
+    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1', public_key: JSON.stringify(jwk) });
 
     const htu = 'https://login.access.example.com/v1/ingest/event';
     const iat = nowSeconds();
@@ -121,7 +127,7 @@ describe('DPoP', () => {
     const { publicKey, privateKey } = await generateKeyPair('ES256');
     const jwk = (await exportJWK(publicKey)) as JWK;
     const jkt = await calculateJkt(jwk);
-    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1' });
+    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1', public_key: JSON.stringify(jwk) });
 
     const iat = nowSeconds();
     const jwt = await makeDpopJwt({
@@ -136,6 +142,38 @@ describe('DPoP', () => {
     const result = await verifyDPoP(jwt, 'POST', 'https://login.access.example.com/v1/ingest/other', db);
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.reason).toBe('HTU_MISMATCH');
+  });
+
+  it('verifyDPoP canonicalizes htu (ignores query, normalizes host/port, trims trailing slash)', async () => {
+    const db = new MockD1Database() as unknown as D1Database;
+    const { publicKey, privateKey } = await generateKeyPair('ES256');
+    const jwk = (await exportJWK(publicKey)) as JWK;
+    const jkt = await calculateJkt(jwk);
+    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1', public_key: JSON.stringify(jwk) });
+
+    const iat = nowSeconds();
+    const proofHtu = 'https://LOGIN.ACCESS.EXAMPLE.COM:443/v1/ingest/event/?x=1';
+    const reqHtu = 'https://login.access.example.com/v1/ingest/event';
+    const jwt = await makeDpopJwt({ jwk, privateKey, htm: 'POST', htu: proofHtu, iat, jti: 'jti-htu-canon' });
+
+    const result = await verifyDPoP(jwt, 'POST', reqHtu, db);
+    expect(result.valid).toBe(true);
+  });
+
+  it('verifyDPoP supports kid=jkt (no jwk embedded) by looking up the registered key', async () => {
+    const db = new MockD1Database() as unknown as D1Database;
+    const { publicKey, privateKey } = await generateKeyPair('ES256');
+    const jwk = (await exportJWK(publicKey)) as JWK;
+    const jkt = await calculateJkt(jwk);
+    (db as any).state.dpop_keys.set(jkt, { jkt, user_id: 'user1', public_key: JSON.stringify(jwk) });
+
+    const htu = 'https://login.access.example.com/v1/ingest/event';
+    const iat = nowSeconds();
+    const jwt = await makeDpopJwtWithKid({ kid: jkt, privateKey, htm: 'POST', htu, iat, jti: 'jti-kid' });
+
+    const result = await verifyDPoP(jwt, 'POST', htu, db);
+    expect(result.valid).toBe(true);
+    if (result.valid) expect(result.jkt).toBe(jkt);
   });
 });
 

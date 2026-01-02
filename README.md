@@ -59,16 +59,33 @@ Set `ACCESS_TOKEN_SECRET` (dev-only) in `.dev.vars`, and store it as a Worker se
 
 ## DPoP Verification (what is checked)
 
-The `DPoP` header is expected to be a compact JWT with `typ=dpop+jwt` and an embedded public `jwk` in the header.
+The `DPoP` header is expected to be a compact JWT with `typ=dpop+jwt`.
 
 Verification checks:
 
 - `htm` matches the HTTP method
-- `htu` matches the request URL
+- `htu` matches the request URL (**canonicalized**; see below)
 - `iat` is within a time window
 - `jti` uniqueness with TTL 120s (replay protection)
 - JWT signature validity
 - key must already be registered (JWK thumbprint = `jkt` exists in `dpop_keys`)
+
+### DPoP htu canonicalization (important)
+
+To avoid common real-world mismatches, the server compares `htu` using a canonical form:
+
+- **Compare**: `origin + pathname` only (query/fragment ignored)
+- **Normalize**: lowercase host, ignore default port (`:80` for http, `:443` for https)
+- **Normalize**: trim trailing slash (except `/`)
+
+Recommendation: clients should build `htu` as `window.location.origin + pathname` (no query).
+
+### DPoP header size (jwk vs kid)
+
+This Worker supports both:
+
+- **Simple mode (demo)**: DPoP JWT header includes `jwk` each request (bigger header)
+- **Production-friendly mode**: DPoP JWT header includes `kid` (treated as `jkt`) and the server loads the registered public JWK from `dpop_keys`
 
 ## Flows (Mermaid)
 
@@ -81,15 +98,24 @@ sequenceDiagram
   participant G as Google
 
   U->>W: GET /v1/auth/google/start
-  W->>W: create oauth_states(state, code_verifier)
-  W-->>U: 302 Location: Google auth URL (state+PKCE)
+  W->>W: create oauth_states(state(with nonce), code_verifier, TTL)
+  W-->>U: 302 Location: Google auth URL (state+PKCE+nonce)
   U->>G: OAuth authorize
   G-->>U: Redirect to /v1/auth/google/callback?code&state
   U->>W: GET /v1/auth/google/callback?code&state
-  W->>W: validate state + exchange code for token + fetch userinfo
+  W->>W: validate state(one-time, TTL) + exchange code for token
+  W->>W: verify id_token (iss/aud/exp/iat/nonce) and extract sub/email
   W->>W: upsert users + create sessions row
   W-->>U: 302 Location: / + Set-Cookie: session=...
 ```
+
+### Google OIDC verification checklist (implemented)
+
+- **id_token verification**: `iss` / `aud` / `exp` (and `iat` sanity window) + `nonce`
+- **state**: one-time (deleted on first use) + TTL enforced
+- **redirect_uri**: fixed to `ORIGIN + /v1/auth/google/callback` (not derived from request URL)
+- **email usage**: if we use email for account linking, we require `email_verified === true`
+- **final identity**: account identity is determined by **`id_token.sub`** (userinfo is not used as the source of truth)
 
 ### Passkey login/registration (WebAuthn)
 
