@@ -20,6 +20,43 @@ This project implements a DPoP-based authentication system with event ingestion 
 4. Run locally: `npm run dev -- --local`
 5. Deploy: `npm run deploy`
 
+### Local multi-domain (hosts) setup (optional)
+
+If you want to simulate separate legacy sites and a dedicated DPoP/login site locally (e.g. `www.okcashbag.com` + `login.okcashbag.com`),
+you can map local dev hostnames to `127.0.0.1` and use a local TLS proxy.
+
+1) Add to your hosts file (examples):
+
+```text
+127.0.0.1 login.okcashbag.local
+127.0.0.1 www.okcashbag.local
+127.0.0.1 m.okcashbag.local
+127.0.0.1 webview.okcashbag.local
+```
+
+2) Generate local certificates (creates a local CA + SAN cert):
+
+```bash
+bash dev/generate-local-certs.sh
+```
+
+3) Trust the local CA cert in your OS/browser:
+
+- macOS: Keychain Access → import `dev/certs/local-ca.crt` → set to “Always Trust”
+
+4) Run the worker + TLS proxy:
+
+```bash
+npm run dev -- --local
+npm run dev:tls
+```
+
+Then open:
+
+- `https://login.okcashbag.local:8443/`
+
+Note: WebAuthn requires HTTPS (or `localhost`). The TLS proxy exists only for local multi-domain testing.
+
 ### Local WebAuthn note
 
 WebAuthn requires a secure context. `localhost` is treated as secure, so for local dev set:

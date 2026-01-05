@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "wrangler dev",
+    "dev:tls": "node dev/tls-proxy.mjs",
     "deploy": "wrangler deploy",
     "test": "vitest"
   },
