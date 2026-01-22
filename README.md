@@ -1,5 +1,7 @@
 # DPoP-based Login Site + Event Ingest + FDS Engine
 
+[![DPoP Demo Video](https://img.youtube.com/vi/r-Hb6Cjfe4c/hqdefault.jpg)](https://www.youtube.com/watch?v=r-Hb6Cjfe4c)
+
 This project implements a DPoP-based authentication system with event ingestion and a Fraud Detection System (FDS) engine using Cloudflare Workers and D1.
 
 ## Features
