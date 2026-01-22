@@ -34,6 +34,21 @@ you can map local dev hostnames to `127.0.0.1` and use a local TLS proxy.
 127.0.0.1 webview.okcashbag.local
 ```
 
+Optional: if you want the **DPoP site origin** to look like production, you can also map:
+
+```text
+127.0.0.1 dpop.skplanet.com
+```
+
+Alternative (no hosts-file edits): launch Chromium with host mapping rules:
+
+```bash
+# macOS example (Chrome). Do NOT add --ignore-certificate-errors if you want WebAuthn/Passkey to work.
+open -na "Google Chrome" --args \
+  --user-data-dir="$PWD/.chrome-profile" \
+  --host-resolver-rules="MAP dpop.skplanet.com 127.0.0.1, MAP www.okcashbag.com 127.0.0.1, MAP member.okcashbag.com 127.0.0.1"
+```
+
 2) Generate local certificates (creates a local CA + SAN cert):
 
 ```bash
@@ -43,6 +58,7 @@ bash dev/generate-local-certs.sh
 3) Trust the local CA cert in your OS/browser:
 
 - macOS: Keychain Access → import `dev/certs/local-ca.crt` → set to “Always Trust”
+- macOS (recommended, one command): `bash dev/trust-local-ca-macos.sh` (requires sudo)
 
 4) Run the worker + TLS proxy:
 
@@ -54,8 +70,15 @@ npm run dev:tls
 Then open:
 
 - `https://login.okcashbag.local:8443/`
+- (optional) `https://dpop.skplanet.com:8443/`
 
 Note: WebAuthn requires HTTPS (or `localhost`). The TLS proxy exists only for local multi-domain testing.
+
+If you see `NotAllowedError: WebAuthn is not supported on sites with TLS certificate errors`, it means the browser considers the cert **invalid/untrusted**. Fix by:
+
+- Trusting the local CA (`dev/certs/local-ca.crt`) in your OS trust store (not just “proceed anyway” in the browser)
+- Restarting Chrome/Chromium
+- Do **not** use `--ignore-certificate-errors` for Passkey/WebAuthn testing (WebAuthn will be blocked)
 
 ### Local WebAuthn note
 
@@ -65,6 +88,11 @@ WebAuthn requires a secure context. `localhost` is treated as secure, so for loc
 - `ORIGIN = "http://localhost:8787"`
 
 in `wrangler.toml` (or your dev-only overrides).
+
+If you use the TLS proxy + `dpop.skplanet.com`, set in `.dev.vars`:
+
+- `RP_ID=dpop.skplanet.com`
+- `ORIGIN=https://dpop.skplanet.com:8443`
 
 ### Google OAuth secrets
 
@@ -252,6 +280,20 @@ sequenceDiagram
 ## Testing
 
 Run tests: `npm test`
+
+## Legacy integration (popup SDK, remote signing model)
+
+This repo now supports a **remote signing** integration:
+
+- legacy sites load `GET /sdk.js`
+- the SDK opens a popup at `GET /sdk/agent`
+- the popup (dedicated DPoP site origin) holds the DPoP private key and sends `POST /v1/ingest/event` directly
+- the legacy site only sends event payloads to the popup via `postMessage`
+
+Security controls:
+
+- the popup only accepts `postMessage` from origins in `SDK_ALLOWED_ORIGINS` (exact `origin` match, comma-separated)
+- you can additionally pin `client_origin` via `/sdk/agent?client_origin=...` (the SDK does this automatically)
 
 ## Local ingest demo (DPoP proof)
 

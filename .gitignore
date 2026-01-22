@@ -3,6 +3,9 @@ node_modules/
 .wrangler/
 .DS_Store
 dev/certs/
+dist/
+audit-pack/
+.chrome-*/
 
 
 

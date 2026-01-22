@@ -4,6 +4,9 @@ ACCESS_TOKEN_SECRET=dev-only-change-me
 RP_ID=localhost
 ORIGIN=http://localhost:8787
 WEBAUTHN_RP_NAME=DPoP Login
+# Legacy origins allowed to talk to the popup agent via postMessage (exact origin match).
+SDK_ALLOWED_ORIGINS=https://www.okcashbag.com,https://member.okcashbag.com
+TRUST_PROXY_HEADERS=1
 
 # Demo scripts only (optional):
 # A test private JWK used by node scripts (e.g. scripts/ingest-demo.mjs) to generate DPoP proofs.

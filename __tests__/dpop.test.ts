@@ -97,6 +97,7 @@ describe('DPoP', () => {
     expect(result.valid).toBe(true);
     if (result.valid) {
       expect(result.jkt).toBe(jkt);
+      expect(result.user_id).toBe('user1');
       expect(result.iat).toBe(iat);
       expect(result.jti).toBe('jti-1');
       expect(result.bound_member_id).toBe('member123');
@@ -173,7 +174,10 @@ describe('DPoP', () => {
 
     const result = await verifyDPoP(jwt, 'POST', htu, db);
     expect(result.valid).toBe(true);
-    if (result.valid) expect(result.jkt).toBe(jkt);
+    if (result.valid) {
+      expect(result.jkt).toBe(jkt);
+      expect(result.user_id).toBe('user1');
+    }
   });
 });
 

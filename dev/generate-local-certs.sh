@@ -39,6 +39,9 @@ DNS.2 = www.okcashbag.local
 DNS.3 = m.okcashbag.local
 DNS.4 = webview.okcashbag.local
 DNS.5 = okcashbag.local
+DNS.6 = dpop.skplanet.com
+DNS.7 = www.okcashbag.com
+DNS.8 = member.okcashbag.com
 EOF
 
 echo "==> Signing server cert with local CA"
@@ -51,5 +54,7 @@ echo "- CA cert (import + trust this in your OS/browser): $CA_CERT"
 echo "- Server cert/key (used by local TLS proxy):"
 echo "  - $SERVER_CERT"
 echo "  - $SERVER_KEY"
+
+
 
 

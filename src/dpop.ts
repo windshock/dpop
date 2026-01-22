@@ -4,7 +4,7 @@ import type { DPoPKey } from './types';
 import { nowSeconds } from './utils';
 
 export type DPoPVerifyResult =
-  | { valid: true; jkt: string; bound_member_id?: string; iat: number; jti: string }
+  | { valid: true; jkt: string; user_id: string; bound_member_id?: string; iat: number; jti: string }
   | { valid: false; reason: string };
 
 export async function calculateJkt(jwk: JWK): Promise<string> {
@@ -126,7 +126,7 @@ export async function verifyDPoP(dpopJwt: string, htm: string, htu: string, db: 
     const keyRecord = (await db.prepare('SELECT * FROM dpop_keys WHERE jkt = ?').bind(jkt).first()) as DPoPKey | null;
     if (!keyRecord) return { valid: false, reason: 'UNREGISTERED_KEY' };
 
-    return { valid: true, jkt, bound_member_id: keyRecord.member_id, iat: pIat, jti: pJti };
+    return { valid: true, jkt, user_id: keyRecord.user_id, bound_member_id: keyRecord.member_id, iat: pIat, jti: pJti };
   } catch {
     return { valid: false, reason: 'INVALID_PROOF' };
   }

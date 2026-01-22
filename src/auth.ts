@@ -581,7 +581,8 @@ export async function handleWebAuthnEnrollOptions(request: Request, env: Env): P
 
   const creds = ((await env.DB.prepare('SELECT * FROM webauthn_credentials WHERE user_id = ?').bind(user.id).all()).results ??
     []) as unknown as WebAuthnCredentialRecord[];
-  if (creds.length > 0) return json({ error: 'already_registered' }, { status: 409 });
+  // Allow adding additional passkeys for the same user (e.g. new device / phone).
+  // We still exclude existing credential IDs to avoid duplicate registrations.
 
   const options = await generateRegistrationOptions({
     rpName: env.WEBAUTHN_RP_NAME,

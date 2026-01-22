@@ -2,6 +2,7 @@ import https from 'node:https';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Minimal HTTPS reverse proxy for local multi-domain testing.
@@ -13,7 +14,11 @@ import path from 'node:path';
  * This is intentionally dependency-free (no express/http-proxy).
  */
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+// IMPORTANT: On Windows, `new URL(import.meta.url).pathname` yields a path like `/C:/...`,
+// which breaks naive path resolution. Use fileURLToPath for cross-platform correctness.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT = path.resolve(__dirname, '..');
 const CERT_DIR = path.join(ROOT, 'dev', 'certs');
 
 const TLS_PORT = Number(process.env.TLS_PORT || 8443);
@@ -26,6 +31,10 @@ const keyPath = process.env.TLS_KEY || path.join(CERT_DIR, 'okcashbag.local.key'
 if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
   console.error('Missing TLS cert/key. Generate them first:');
   console.error('  bash dev/generate-local-certs.sh');
+  console.error('');
+  console.error('Resolved paths:');
+  console.error(`  cert: ${certPath}`);
+  console.error(`  key:  ${keyPath}`);
   process.exit(1);
 }
 
@@ -38,6 +47,9 @@ const server = https.createServer(
     const headers = { ...req.headers };
     // Ensure upstream gets correct host. (Node lowercases header names in req.headers already.)
     headers.host = headers.host || `${TARGET_HOST}:${TARGET_PORT}`;
+    headers['x-forwarded-proto'] = 'https';
+    // Preserve original host (including :8443) for reconstructing effective URL in the Worker (dev-only).
+    if (req.headers.host) headers['x-forwarded-host'] = req.headers.host;
 
     const upstream = http.request(
       {
@@ -65,6 +77,7 @@ const server = https.createServer(
 server.listen(TLS_PORT, '0.0.0.0', () => {
   console.log(`TLS proxy ready: https://login.okcashbag.local:${TLS_PORT} -> http://${TARGET_HOST}:${TARGET_PORT}`);
   console.log(`(also works for https://www.okcashbag.local:${TLS_PORT}, https://m.okcashbag.local:${TLS_PORT}, https://webview.okcashbag.local:${TLS_PORT})`);
+  console.log(`(and also: https://dpop.skplanet.com:${TLS_PORT} if you mapped hosts + generated SAN cert)`);
 });
 
 
